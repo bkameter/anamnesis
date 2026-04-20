@@ -1,0 +1,17 @@
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local state
+.claude/
+
+# macOS
+.DS_Store
+
+# Go build output
+/anamnesis
+/dist/
+*.test
+*.out
+coverage.*

@@ -12,6 +12,9 @@
 # Go build output
 /anamnesis
 /dist/
+bin/
+vendor/
+*.exe
 *.test
 *.out
 coverage.*

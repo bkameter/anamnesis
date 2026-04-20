@@ -1,0 +1,42 @@
+# Anamnesis local development stack.
+# See docs/concept.md §4.2 for design rationale.
+#
+# Usage from repo root:
+#   docker compose -f docker/compose.yaml up -d                  # db only
+#   docker compose -f docker/compose.yaml --profile viewer up -d # db + age-viewer
+#   docker compose -f docker/compose.yaml down                   # stop everything
+
+services:
+  anamnesis-db:
+    build: ./anamnesis-db
+    image: anamnesis/postgres:17
+    environment:
+      POSTGRES_DB: anamnesis
+      POSTGRES_USER: anamnesis
+      POSTGRES_PASSWORD: anamnesis_local
+    ports: ["55432:5432"]
+    volumes:
+      - anamnesis_pgdata:/var/lib/postgresql/data
+      - ./anamnesis-db/init.sql:/docker-entrypoint-initdb.d/00-extensions.sql
+    command: >
+      postgres
+        -c shared_preload_libraries=age
+        -c search_path=ag_catalog,public
+        -c max_connections=200
+        -c shared_buffers=512MB
+        -c effective_cache_size=2GB
+    restart: unless-stopped
+
+  # Opt-in via the `viewer` compose profile. Loopback-only: the viewer has no
+  # app-level auth, so any reachable host gets a Postgres login form. See
+  # docs/concept.md §4.2.
+  age-viewer:
+    build: https://github.com/apache/age-viewer.git#v1.0.0
+    image: anamnesis/age-viewer:1.0.0
+    profiles: ["viewer"]
+    ports: ["127.0.0.1:8089:3001"]
+    depends_on: [anamnesis-db]
+    restart: unless-stopped
+
+volumes:
+  anamnesis_pgdata:

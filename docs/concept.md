@@ -120,10 +120,22 @@ services:
         -c max_connections=200
         -c shared_buffers=512MB
         -c effective_cache_size=2GB
+    restart: unless-stopped
+
+  # Opt-in via the `viewer` compose profile. See prose below.
+  age-viewer:
+    build: https://github.com/apache/age-viewer.git#v1.0.0
+    image: anamnesis/age-viewer:1.0.0
+    profiles: ["viewer"]
+    ports: ["127.0.0.1:8089:3001"]
+    depends_on: [anamnesis-db]
+    restart: unless-stopped
 
 volumes:
   anamnesis_pgdata:
 ```
+
+Apache publishes no upstream image, so the service builds from source pinned to an immutable tag (bump deliberately). It binds to loopback because the viewer has no app-level auth — anyone reaching the port gets a Postgres login form; `anamnesis deps` (§7.1) is the headless equivalent. `anamnesis server start --with-viewer` translates to `docker compose --profile viewer up`; `server stop` tears down every running service regardless of profile, so there is no separate teardown flag. Browse to <http://localhost:8089> and connect with host `anamnesis-db` (the compose service name, not `localhost`), port `5432` (in-network, not the published `55432`), database/user `anamnesis`, password `anamnesis_local`. The viewer also prompts for a graph name; each project has its own, named `proj_<sanitised-project-name>` (see §5.2) — use `anamnesis project list` (§7.2) to see project names. Useful for exploring the edge types listed in §5.2 without writing Cypher by hand.
 
 ```sql
 -- docker/anamnesis-db/init.sql
@@ -358,6 +370,8 @@ The recall query string is stored in the `events` table (§15). Before storage, 
 
 ### 6.3 RRF query (simplified)
 
+Parameters: `$1` = query text, `$2` = project, `$3` = query vector, `$4` = current embedding-model tag (e.g. `embeddinggemma-300m@512`), `$5` = result limit.
+
 ```sql
 WITH kw AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(search_vec, websearch_to_tsquery('english', $1)) DESC) AS rnk
@@ -376,7 +390,9 @@ fz AS (
 sm AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $3::vector) AS rnk
     FROM entries
-    WHERE project = $2 AND deleted_at IS NULL AND embedding IS NOT NULL
+    WHERE project = $2 AND deleted_at IS NULL
+      AND embedding IS NOT NULL
+      AND embedding_model = $4              -- current configured model tag
     ORDER BY embedding <=> $3::vector
     LIMIT 20
 ),
@@ -390,14 +406,14 @@ fused AS (
 )
 SELECT e.key, e.category, e.summary, e.tags, e.file_paths, e.needs_refresh, f.score
 FROM fused f JOIN entries e USING(id)
-ORDER BY f.score DESC LIMIT $4;
+ORDER BY f.score DESC LIMIT $5;
 ```
 
 ### 6.4 Graceful degradation
 
 - Bundled local model fails to load (corrupt weights, ONNX runtime load error) → anamnesis logs a warning and the `sm` CTE returns nothing; tsvector + pg_trgm carry the query. `anamnesis doctor` surfaces the problem.
 - API provider (if configured) unreachable → same fallback; anamnesis does not auto-switch to the bundled model for individual queries (switching providers is an explicit `re-embed` operation to keep vector space consistent).
-- Partway through an embedding migration → rows with `embedding IS NULL` drop from the `sm` branch. RRF continues with the other two.
+- Partway through an embedding migration → two mechanisms keep the vector space clean. (a) On a dim change, the `ALTER COLUMN … USING NULL` step wipes every row's vector first, so rows drop from `sm` via `embedding IS NULL`. (b) On a same-dim, different-model switch (e.g. `local@512 → ollama@512`), old vectors still exist but carry the prior `embedding_model` tag; the `sm` CTE filter `embedding_model = $4` excludes them until `re-embed` has written the new model's vector. Either way, RRF continues with the other two branches for unmigrated rows. See §13.5.
 - pgvector extension absent → `sm` CTE is skipped. FTS + trigram cover.
 - The agent-visible contract never breaks: recall always returns something sensible, with `[stale]` markers where relevant.
 
@@ -460,7 +476,7 @@ All commands support `--format text` (default) and `--format json`. Project scop
 
 ```bash
 # Server lifecycle (Docker Compose wrapped)
-anamnesis server start|stop|status|logs
+anamnesis server start|stop|status|logs            # `start` accepts --with-viewer (see §4.2)
 
 # Project setup
 anamnesis init [--at PATH] [--name NAME]           # register project, run Phase 1
@@ -585,21 +601,28 @@ Granularity: one entry per logical completed task (roughly PR scope), not per fi
 
 ### 9.2 Post-commit hook — graph refresh + staleness marking
 
-On every commit (and merge), a git post-commit hook runs:
+On every commit (and merge), a git post-commit hook runs. **The hook itself is a thin shim that spawns a detached `anamnesis scan --changed --from-commit HEAD^..HEAD` and returns immediately** — zero blocking on the developer's terminal, no perceptible delay even on a merge that touches hundreds of files. The detached scan does the real work:
 
 ```
-For each changed file (git log --name-status -M):
+For each changed file (git log --name-status -M HEAD^..HEAD):
   - If rename: update entry key + file_paths; update AGE Module node; rewrite depends_on arrays in other entries.
   - If content changed: compare new git blob hash vs entry.content_hash;
     if different → UPDATE entries SET needs_refresh = true WHERE key = ...
-  - Re-run analyzer → drop and re-create outgoing edges in AGE graph (single transaction).
+  - Re-run analyzer → drop and re-create outgoing edges in AGE graph (single transaction per file).
   - If deleted: soft-delete entry (deleted_at = NOW()), DETACH DELETE Module node.
 
-Graph is always current within milliseconds of commit.
-Entries are flagged as stale, never auto-regenerated.
+Graph converges within a second or two of commit on typical diffs,
+seconds to ~a minute on large merges. Entries are flagged as stale,
+never auto-regenerated.
 ```
 
-Cost: zero tokens. Milliseconds per file. The agent's next recall sees `[stale]` markers for files the user's edits touched.
+The detached scan takes the per-project `scan` advisory lock (§17.2). If a previous scan is still running (e.g. an octopus merge followed immediately by another commit), the new invocation exits cleanly; the running scan already sees the latest HEAD via `--from-commit HEAD^..HEAD` resolved at launch time. A rare race where two back-to-back commits both lose the lock is covered by the next `anamnesis scan --changed` (manual or editor-triggered) reconciling.
+
+**Failure mode.** If the detached process crashes or the machine sleeps mid-scan, the graph is temporarily out of date. `anamnesis doctor` reports *"N files committed since last successful scan"* and nudges the user to run `anamnesis scan --changed`. Graceful-degradation principle: the agent still functions; `deps` queries just miss the most recent edges.
+
+**Threshold nudge.** For huge merges (default: >500 changed files), the hook prints a single stderr line — *"anamnesis: backgrounding scan of 842 files; `anamnesis stats` shows progress"* — so the developer isn't surprised if `deps` queries on the hot files stay stale for a minute.
+
+Cost: zero tokens. The agent's next recall sees `[stale]` markers for files the user's edits touched, once the background scan commits.
 
 ### 9.3 PostToolUse hook (optional, Claude Code)
 
@@ -667,10 +690,43 @@ The scrubber runs against every `remember` / `remember-batch` summary AND every 
 - **Secret-in-text framings:** `(password|secret|token|api[_-]?key)\s*[:=]\s*['"]?[^\s'"]{8,}`.
 - Patterns live in a YAML config shipped with the binary; users append project-specific ones via `scrubber.extra_patterns`.
 
+**Allowlist for the generic high-entropy rule.** The high-entropy regex hits a lot of non-secret shapes common in code summaries — git SHAs, UUIDs, content hashes, npm integrity digests. These are explicit skips, not entropy-tuned away:
+
+- Git object SHAs: `\b[0-9a-f]{7,40}\b` when the surrounding text contains *"commit"*, *"sha"*, *"blob"*, *"tree"*, or a backtick-delimited inline context.
+- UUIDs v1–v5: `\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b`.
+- Subresource integrity / content hashes: strings prefixed `sha256-`, `sha384-`, `sha512-`.
+- Base64-ish short runs (<44 chars) that decode to printable ASCII and lack prefix markers (per §11.1 secret-framings rule).
+
+Allowlist is also user-extendable via `scrubber.allowlist_patterns`. Provider-key shapes and private-key headers are **never** allowlisted — no false-positive pressure there justifies the risk.
+
 ### 11.2 Behavior
 
-- **`remember` / `remember-batch`:** on match, exits non-zero with the matched pattern and a masked snippet. **Whole batch fails** on any hit (agents retry after pruning the offending entry). `--force-insecure` bypasses; the write is tagged `source='forced-insecure'` in events for auditability.
-- **`anamnesis scrub`:** standalone, reads stdin, reports findings, exits 0 if clean. The skill instructs the agent to self-check via `scrub` before calling `remember`.
+- **`remember` (single):** on match, exits non-zero with the matched pattern name and a masked snippet. `--force-insecure` bypasses; the write is tagged `source='forced-insecure'` in events for auditability.
+- **`remember-batch`:** scrubs every entry up front, **rejects the whole batch on any hit**, and writes a structured per-entry report to stderr so the agent can recover without re-submitting blind. Output is JSON when `--format json` is passed (default for batch), text otherwise. Example (one clean entry, one rejected):
+
+    ```json
+    {
+      "ok": false,
+      "scanned": 12,
+      "clean": 11,
+      "rejected": 1,
+      "hits": [
+        {
+          "index": 4,
+          "key": "task:2026-04-20-slack-webhook",
+          "pattern": "provider_key.slack_bot",
+          "field": "summary",
+          "offset": 182,
+          "snippet": "...token is `xoxb-****************************************7a2c`..."
+        }
+      ]
+    }
+    ```
+
+    Exit codes: `0` clean, `2` any hit (distinct from generic errors at `1`). Agents are expected to drop the offending entries (`.hits[].index`) from the batch and retry; anamnesis does not auto-retry because the agent owns the summary content.
+
+- **Bypass modes.** `--force-insecure` forces the entire batch through with every write tagged `source='forced-insecure'`. `--force-insecure-indices 4,9` forces only the listed entries — the agent can opt in per-entry when it genuinely needs to commit a high-entropy string it knows isn't secret (e.g. a documented test fixture). Both modes produce one `events` row per forced write and surface in `anamnesis audit --source forced-insecure`.
+- **`anamnesis scrub`:** standalone, reads stdin, reports findings, exits 0 if clean, 2 on hit. The skill instructs the agent to self-check via `scrub` before calling `remember`.
 - **Order of operations:** scrub first, then embed, then insert. Scrub rejections never incur embedder cost.
 - **`anamnesis doctor --scan-existing-for-secrets`:** re-runs scrubber over existing entries after a pattern-list upgrade. Reports hits; does not auto-delete.
 
@@ -782,7 +838,12 @@ You change **provider**, **model**, or **dimension**. Vectors from different mod
 
 ### 13.5 During migration
 
-Recall's vector branch filters `WHERE embedding IS NOT NULL`. Rows without embeddings silently drop from the `sm` CTE; RRF proceeds with FTS + trigram. `anamnesis stats` reports progress: *"re-embed in progress: 23,416 / 47,312 entries (49%)"*.
+Recall's vector branch filters on both `embedding IS NOT NULL` **and** `embedding_model = <current-config-tag>`. This covers two cases cleanly:
+
+- **Dim change.** Step 6 of §13.4 nulls every vector before the batch loop repopulates; rows drop from `sm` until re-embedded. Until the HNSW index is recreated in step 9, the `sm` CTE falls back to a sequential scan — fine for a few thousand rows, slow on a 100k-entry store. `anamnesis stats` surfaces *"index rebuilding"* so the user knows why recall feels heavier.
+- **Same-dim, different-model switch.** Old vectors remain in place, but their `embedding_model` tag still points at the previous provider/model, so the tag filter excludes them from `sm` until the batch loop overwrites with the new provider's vector. This prevents the silent-corruption case where two different vector spaces coexist in one HNSW index.
+
+`anamnesis stats` reports progress: *"re-embed in progress: 23,416 / 47,312 entries (49%) — model `voyage-3-large@512`"*.
 
 ### 13.6 New writes during migration
 
@@ -1064,6 +1125,7 @@ updates:
 
 scrubber:
   extra_patterns: []                    # project can add more
+  allowlist_patterns: []                # skip matches for this shape (e.g. project-specific non-secret IDs)
 
 prune:
   tombstone_ttl: 90d
@@ -1136,7 +1198,7 @@ graph:
 
 ### v1 ships
 
-- Go binary (macOS arm64/amd64, Linux amd64/arm64), Docker Compose for Postgres 17 + pgvector + pg_trgm + AGE on port 55432.
+- Go binary (macOS arm64/amd64, Linux amd64/arm64), Docker Compose for Postgres 17 + pgvector + pg_trgm + AGE on port 55432, plus an opt-in Apache AGE Viewer service for graph visualisation.
 - CLI: `recall`, `remember`, `remember-batch`, `remember-task`, `forget`, `mark-stale`, `deps`, `scrub`, `today`, `status`.
 - Operator CLI: `server`, `init`, `scan`, `doctor`, `stats`, `audit`, `tags` (list/rename/merge), `migrate`, `re-embed`, `export`, `import`, `backup`, `restore`, `prune`, `install-skill`, `install-hooks`, `config`.
 - Tree-sitter analyzers: TypeScript/JavaScript, Go, Java, Dart (Flutter).

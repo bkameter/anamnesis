@@ -51,6 +51,33 @@ Enabled by the `viewer` compose profile. Bound to `127.0.0.1:8089` because the v
   - Database / user / password: as above
   - Graph name: one graph per project, named `proj_<sanitised-project-name>`. Use the `anamnesis project list` CLI to enumerate.
 
+## Smoke test
+
+Verify all three extensions work against a running container:
+
+```bash
+bash docker/smoke.sh
+```
+
+The script waits for the container to report `healthy`, then runs four checks: extensions present, pgvector distance query, pg_trgm similarity, Apache AGE graph round-trip. Exits non-zero on first failure.
+
+## Build baseline (first run, April 2026)
+
+| Metric | Value |
+|---|---|
+| Docker version | 28.1.1 |
+| Final image size | 154 MB |
+| First-build duration | ~47 s (Apple M-series, warm network) |
+| Apache AGE tag | `PG17/v1.7.0-rc0` (no stable PG17 release exists yet; `release/PG17/1.5.0` referenced in the concept doc never shipped upstream) |
+
+## AGE viewer first-paint
+
+After `docker compose -f docker/compose.yaml --profile viewer up -d`, open <http://localhost:8089>. You will see a connection form. Enter:
+- Host: `anamnesis-db`, Port: `5432`
+- Database: `anamnesis`, User: `anamnesis`, Password: `anamnesis_local`
+
+The AGE viewer build (~1–2 min) runs only once; subsequent starts are instant.
+
 ## Using your own Postgres
 
 If you already run Postgres with the three extensions, skip this stack entirely and point the CLI at it via `ANAMNESIS_DATABASE_URL`. The CLI will install the extensions if it has permission; otherwise it prints the exact SQL to run.

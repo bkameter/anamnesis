@@ -9,7 +9,7 @@ See [`../docs/concept.md`](../docs/concept.md) §4.2 for the design rationale (w
 ```
 docker/
 ├── anamnesis-db/
-│   ├── Dockerfile       # pgvector base + Apache AGE 1.5.0 for PG17
+│   ├── Dockerfile       # pgvector base + Apache AGE 1.7.0-rc0 for PG17
 │   └── init.sql         # CREATE EXTENSION for pg_trgm, vector, age
 ├── compose.yaml         # anamnesis-db + (opt-in) age-viewer services
 └── README.md            # this file
@@ -65,7 +65,7 @@ The script waits for the container to report `healthy`, then runs four checks: e
 
 | Metric | Value |
 |---|---|
-| Docker version | 28.1.1 |
+| Docker version | 28.3.2 |
 | Final image size | 154 MB |
 | First-build duration | ~47 s (Apple M-series, warm network) |
 | Apache AGE tag | `PG17/v1.7.0-rc0` (no stable PG17 release exists yet; `release/PG17/1.5.0` referenced in the concept doc never shipped upstream) |

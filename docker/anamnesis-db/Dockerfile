@@ -1,7 +1,7 @@
 # Postgres 17 + pgvector + pg_trgm + Apache AGE
 # See docs/concept.md §4.2 for rationale. No upstream image bundles all three,
 # so this image combines pgvector/pgvector:pg17 as the base and builds Apache
-# AGE (release/PG17/1.5.0) on top. Published port: 55432 (set in compose.yaml).
+# AGE (PG17/v1.7.0-rc0) on top. Published port: 55432 (set in compose.yaml).
 
 FROM pgvector/pgvector:pg17 AS base
 

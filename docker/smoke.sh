@@ -4,9 +4,6 @@
 # Exits 0 on success, non-zero on first failure.
 set -euo pipefail
 
-DB_CONTAINER=$(docker compose -f docker/compose.yaml ps -q anamnesis-db)
-PSQL="docker exec -i $DB_CONTAINER psql -U anamnesis -d anamnesis -v ON_ERROR_STOP=1 -t -A"
-
 echo "==> Waiting for container to be healthy..."
 for i in $(seq 1 24); do
   STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose -f docker/compose.yaml ps -q anamnesis-db)" 2>/dev/null || true)
@@ -19,6 +16,9 @@ if [ "$STATUS" != "healthy" ]; then
   docker compose -f docker/compose.yaml logs anamnesis-db
   exit 1
 fi
+
+DB_CONTAINER=$(docker compose -f docker/compose.yaml ps -q anamnesis-db)
+PSQL="docker exec -i $DB_CONTAINER psql -U anamnesis -d anamnesis -v ON_ERROR_STOP=1 -t -A"
 
 echo "==> AC1: extensions present"
 EXTS=$($PSQL -c "SELECT extname FROM pg_extension WHERE extname IN ('pg_trgm','vector','age') ORDER BY extname;")

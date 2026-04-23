@@ -124,8 +124,8 @@ services:
 
   # Opt-in via the `viewer` compose profile. See prose below.
   age-viewer:
-    build: https://github.com/apache/age-viewer.git#v1.0.0
-    image: anamnesis/age-viewer:1.0.0
+    build: ./docker/age-viewer
+    image: anamnesis/age-viewer:1.0.0-node22
     profiles: ["viewer"]
     ports: ["127.0.0.1:8089:3001"]
     depends_on: [anamnesis-db]
@@ -135,7 +135,7 @@ volumes:
   anamnesis_pgdata:
 ```
 
-Apache publishes no upstream image, so the service builds from source pinned to an immutable tag (bump deliberately). It binds to loopback because the viewer has no app-level auth — anyone reaching the port gets a Postgres login form; `anamnesis deps` (§7.1) is the headless equivalent. `anamnesis server start --with-viewer` translates to `docker compose --profile viewer up`; `server stop` tears down every running service regardless of profile, so there is no separate teardown flag. Browse to <http://localhost:8089> and connect with host `anamnesis-db` (the compose service name, not `localhost`), port `5432` (in-network, not the published `55432`), database/user `anamnesis`, password `anamnesis_local`. The viewer also prompts for a graph name; each project has its own, named `proj_<sanitised-project-name>` (see §5.2) — use `anamnesis project list` (§7.2) to see project names. Useful for exploring the edge types listed in §5.2 without writing Cypher by hand.
+Apache publishes no upstream image, so the service builds from a local Dockerfile (`docker/age-viewer/Dockerfile`) that clones the upstream source at the immutable `v1.0.0` tag and builds it on `node:22-alpine` (the upstream project is unmaintained; all released tags use EOL Node 14, which breaks on a transitive `minimatch@10.2.5` dependency). It binds to loopback because the viewer has no app-level auth — anyone reaching the port gets a Postgres login form; `anamnesis deps` (§7.1) is the headless equivalent. `anamnesis server start --with-viewer` translates to `docker compose --profile viewer up`; `server stop` tears down every running service regardless of profile, so there is no separate teardown flag. Browse to <http://localhost:8089> and connect with host `anamnesis-db` (the compose service name, not `localhost`), port `5432` (in-network, not the published `55432`), database/user `anamnesis`, password `anamnesis_local`. The viewer also prompts for a graph name; each project has its own, named `proj_<sanitised-project-name>` (see §5.2) — use `anamnesis project list` (§7.2) to see project names. Useful for exploring the edge types listed in §5.2 without writing Cypher by hand.
 
 ```sql
 -- docker/anamnesis-db/init.sql

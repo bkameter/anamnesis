@@ -8,12 +8,21 @@ See [`../docs/concept.md`](../docs/concept.md) §4.2 for the design rationale (w
 
 ```
 docker/
+├── age-viewer/
+│   └── Dockerfile       # node:22-alpine override of apache/age-viewer v1.0.0
+│                        # (upstream is unmaintained; all releases use EOL Node 14)
 ├── anamnesis-db/
 │   ├── Dockerfile       # pgvector base + Apache AGE 1.5.0 for PG17
 │   └── init.sql         # CREATE EXTENSION for pg_trgm, vector, age
 ├── compose.yaml         # anamnesis-db + (opt-in) age-viewer services
 └── README.md            # this file
 ```
+
+### Why a local `age-viewer/Dockerfile`?
+
+The upstream `apache/age-viewer` project has not released a new tag since v1.0.0 (December 2021) and all released tags use `node:14-alpine`, which reached EOL in April 2023. A transitive dependency (`minimatch@10.2.5`) requires Node 18/20/≥22, causing the upstream image build to fail.
+
+`docker/age-viewer/Dockerfile` clones the upstream source at the immutable `v1.0.0` tag and builds it on `node:22-alpine`, with two Node 22 compatibility fixes applied (OpenSSL legacy provider for the webpack 4 frontend build, `grep -E` instead of removed `egrep`).
 
 ## Run
 

@@ -7,7 +7,7 @@ The whole ticket: three commit-sized edits to `docs/concept.md`, grouped by acce
 **Test first:** `grep -n '_global' docs/concept.md` returns hits in §2 (principle 6), §3, and §4.3 (a `CHECK` naming `_global` and `code`). Fails now: `_global` appears nowhere in the file.
 
 **Corner cases:**
-- `init --name _global` (and any name with a leading `_`, so the reserved namespace can grow) is refused. §7.2's `init` line gets a comment.
+- `init --name _global` is refused. §7.2's `init` line gets a comment.
 - A `code:` write targeting `_global` is rejected by the DB constraint *and* the CLI with a clear error. It is never silently rerouted to the project.
 - `_global` has no repo root and no AGE graph. §4.3 states that `deps`/graph ops against it error out, the same way they do for "AGE missing".
 - Principle 6 keeps "cross-project leaks are bugs" for every scope pair except project↔`_global` reads.

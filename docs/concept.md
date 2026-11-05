@@ -656,6 +656,8 @@ An empty section is omitted. If the session also finishes a task, the `remember-
 
 **Approval loop.** The agent shows the draft and asks: **save / discard / later**.
 
+A save replaces the whole entry, so the draft must always be the full session summary: if the key already exists, the agent recalls the entry and merges the new material into it before showing the draft. The decision point only limits what is *new* in the transcript, never what the entry keeps. This applies equally to marker-based saves.
+
 - *save* — upsert the entry; records the decision point in the session state.
 - *discard* — writes nothing to memory; records the decision point in the session state, so later drafts cover only newer material.
 - *later* — writes nothing, records nothing; the next prompt comes at the next throttle window.

@@ -644,7 +644,7 @@ Other hooks (auto-recall on `UserPromptSubmit`) are available but not installed 
 
 Sessions without a finished task (discussion, research, aborted work) would otherwise leave nothing behind. A session summary captures them — **only after explicit user approval**. No path in this section writes to memory without it, and Anamnesis never drafts: the agent already running drafts the text (storage-only, §2.2).
 
-**Storage.** One `task:` entry per session, key `task:<start-date>-session-<session-id>`, where `<session-id>` is `ANAMNESIS_SESSION_ID` (§15.1) and the date is the session's *start* date, fixed on first save (a session spanning midnight keeps its key). Each approval is an upsert of that key via `anamnesis remember --key … --category task` — no new CLI command. The entry keeps `task:` semantics (never age-pruned, §16.4) and the §3 size limit of 100–500 tokens. Fixed sections:
+**Storage.** One `task:` entry per session, key `task:<start-date>-session-<session-id>`, where `<session-id>` is `ANAMNESIS_SESSION_ID` (§15.1) and the date is the session's *start* date, recorded in the session state below at session start and reused on every save, including a marker-based save in a later session (a session spanning midnight keeps its key). Each approval is an upsert of that key via `anamnesis remember --key … --category task` — no new CLI command. The entry keeps `task:` semantics (never age-pruned, §16.3) and the §3 size limit of 100–500 tokens. Fixed sections:
 
 - **Decisions** — what was decided and why.
 - **Open / next steps** — what a later session should pick up.
@@ -652,17 +652,19 @@ Sessions without a finished task (discussion, research, aborted work) would othe
 
 An empty section is omitted. If the session also finishes a task, the `remember-task` entry (§9.1) is written separately; neither replaces the other.
 
+**Session state.** The Stop hook, `SessionEnd` hook and skill share one small local file per session in the project's gitignored `.anamnesis/` directory. It holds the session id, start date, transcript path, active-time counter (for the throttle) and the *decision point* (timestamp of the last save/discard plus transcript position). Local state, not a memory write — it works with Postgres down.
+
 **Approval loop.** The agent shows the draft and asks: **save / discard / later**.
 
-- *save* — upsert the entry; records the decision point.
-- *discard* — writes nothing; records the decision point, so later drafts cover only newer material.
+- *save* — upsert the entry; records the decision point in the session state.
+- *discard* — writes nothing to memory; records the decision point in the session state, so later drafts cover only newer material.
 - *later* — writes nothing, records nothing; the next prompt comes at the next throttle window.
 
 **Periodic prompt (Claude Code `Stop` hook, opt-in).** A throttled hook that does nothing but prompt the agent to draft and ask. It never calls `remember` itself. It fires at most once per `updates.session_summary_interval` (default 30 min, §19.2) of *active* session time — time spent in agent turns, not idle wall-clock — and not at all when nothing is new since the last decision.
 
 **Manual trigger.** The user can say "save the session" at any time; the skill (§10.1) then runs the same approval loop. This is the only path for agents without hooks (Codex, Aider; §10.2).
 
-**Session-end safety net (Claude Code `SessionEnd` hook, opt-in).** At session end the hook writes a *pending marker* — session id, transcript path, offer count — to the project's gitignored `.anamnesis/` directory. This is a local file, not a memory write, so it works with Postgres down. At session start the skill checks for markers in *that project only* (a marker is never offered in another project). For each marker, the agent drafts a summary from the transcript and asks save / discard / later. A marker is offered on up to 3 session starts (every offer counts, including "later"), then discarded; it is dropped without a prompt when nothing is new since the last save/discard for that session, or when the transcript no longer exists. Several markers are offered one at a time, oldest first.
+**Session-end safety net (Claude Code `SessionEnd` hook, opt-in).** At session end the hook marks the session state as *pending* and adds an offer count (initially 0); this is the *pending marker*. A marker-based save uses the marker's session id and start date, so the key matches an in-session save. At session start the skill checks for markers in *that project only* (a marker is never offered in another project). For each marker, the agent drafts a summary from the transcript and asks save / discard / later. A marker is offered on up to 3 session starts (every offer counts, including "later"), then discarded; it is dropped without a prompt when nothing is new since the recorded decision point of that session, or when the transcript no longer exists. Several markers are offered one at a time, oldest first.
 
 Deliberately not covered: background or headless summarisation at session end, recovery after a hard crash (no `SessionEnd` fires), and transcripts Claude Code has already deleted (30 days by default).
 

@@ -37,7 +37,7 @@ The savings compound as memory grows. At large scale the story gets better, not 
 3. **Recall before read.** The canonical workflow is encoded in the skill: query memory → query the graph → read only the files not covered → complete the task → write back what was learned.
 4. **Memory is an optimisation, not a critical path.** Every dependency degrades gracefully. Postgres down, embedding provider unreachable, AGE extension missing — the agent falls back to normal file reads and gets the pre-anamnesis experience. Nothing breaks hard.
 5. **Human-inspectable.** Plain-text entries. Standard Postgres. `anamnesis audit` / `stats` / `doctor` show what's happening. `anamnesis export --format json` dumps everything. Nothing is opaque.
-6. **Multi-project by default.** One Postgres instance holds memory for every project on the machine. Project isolation via a `project` column + per-project AGE graph. Scoping is automatic from cwd.
+6. **Multi-project by default.** One Postgres instance holds memory for every project on the machine. Project isolation via a `project` column + per-project AGE graph. Scoping is automatic from cwd. The one exception is the reserved `_global` space (§3, §4.3): a recall may read it alongside the current project. Every other cross-project read is a bug.
 
 ---
 
@@ -58,6 +58,8 @@ Every entry belongs to one of four categories.
 - `code:` entries are paired to a file; they have a `content_hash` and participate in staleness detection.
 - `arch:` / `conv:` / `task:` entries are not paired to a single file's content; they don't go content-hash stale.
 - `task:` entries are never pruned by age by default — their value is timeless.
+
+**The `_global` space.** The reserved pseudo-project `_global` holds knowledge that is not specific to any one project: personal conventions, best practices, transferable lessons. It allows `conv:` (including best practices), `task:` and `arch:` entries — never `code:`, which is file-paired and needs a repo. `_global` has no repo root and no AGE graph, and `anamnesis init` refuses the name.
 
 ---
 
@@ -153,11 +155,14 @@ Power users who run their own Postgres point anamnesis at it via `ANAMNESIS_DATA
 
 CREATE TABLE projects (
     name        TEXT PRIMARY KEY,        -- "acme-monorepo", "personal-blog"
-    repo_root   TEXT NOT NULL,
-    graph_name  TEXT NOT NULL UNIQUE,    -- AGE graph name, sanitised from `name`
+    repo_root   TEXT,                    -- NULL only for `_global`
+    graph_name  TEXT UNIQUE,             -- AGE graph name, sanitised from `name`; NULL only for `_global`
     created_at  TIMESTAMPTZ DEFAULT NOW(),
-    last_scan   TIMESTAMPTZ
+    last_scan   TIMESTAMPTZ,
+    CHECK ((name = '_global') = (repo_root IS NULL AND graph_name IS NULL))
 );
+
+INSERT INTO projects (name) VALUES ('_global');   -- seeded by migration; permanent
 
 CREATE TABLE entries (
     id                      BIGSERIAL PRIMARY KEY,
@@ -184,7 +189,8 @@ CREATE TABLE entries (
     ) STORED,
     created_at              TIMESTAMPTZ DEFAULT NOW(),
     updated_at              TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(project, key)
+    UNIQUE(project, key),
+    CHECK (NOT (project = '_global' AND category = 'code'))   -- no file-paired entries without a repo
 );
 
 CREATE INDEX idx_entries_search         ON entries USING GIN(search_vec)          WHERE deleted_at IS NULL;
@@ -218,6 +224,8 @@ CREATE INDEX idx_events_project_ts ON events(project, ts DESC);
 CREATE INDEX idx_events_key        ON events(key) WHERE key IS NOT NULL;
 CREATE INDEX idx_events_op_ts      ON events(op, ts DESC);
 ```
+
+**`_global` in the schema.** `_global` is an ordinary `projects` row without `repo_root` or `graph_name`; the two `CHECK`s enforce that only it lacks them and that it never holds `code:` entries. They live in the database, not just the CLI, because every agent shares the database. A `code:` write aimed at `_global` is rejected with a clear error, never silently rerouted to the project. `deps` and other graph operations against `_global` error out like "AGE missing" (§6.4). `events` keeps its FK; `_global` operations log under `_global`.
 
 **Embedding dimension is cluster-wide** (all projects share it). Default **512**, produced by the bundled **EmbeddingGemma-300M** model with Matryoshka truncation from its native 768. Selectable at install time: `--embedding-dim 768` (max quality, +50% vector storage), `512` (default), `256` (thin install, ~3% quality loss), `128` (experimental). Switching providers or dimensions later requires an explicit `anamnesis re-embed` — see §13.
 

@@ -332,7 +332,7 @@ Agent: "Can I safely refactor PaymentService?"
 
 ## 6. Hybrid Recall
 
-A single `anamnesis recall` runs up to three search paths and fuses them with Reciprocal Rank Fusion (RRF).
+A single `anamnesis recall` runs up to three search paths and fuses them with Reciprocal Rank Fusion (RRF). By default the search covers the current project **and** the reserved `_global` space (§3) in one ranking; `--no-global` restricts it to the current project. `_global` hits are marked `[global]` in text output and `"scope":"global"` in JSON (§7.3).
 
 ```
       anamnesis recall "session cookie jwt"
@@ -378,27 +378,27 @@ The recall query string is stored in the `events` table (§15). Before storage, 
 
 ### 6.3 RRF query (simplified)
 
-Parameters: `$1` = query text, `$2` = project, `$3` = query vector, `$4` = current embedding-model tag (e.g. `embeddinggemma-300m@512`), `$5` = result limit.
+Parameters: `$1` = query text, `$2` = project (with `--no-global`, the `IN` list below shrinks to `($2)`; outside any project `$2` is `NULL`, so only `_global` matches), `$3` = query vector, `$4` = current embedding-model tag (e.g. `embeddinggemma-300m@512`), `$5` = result limit.
 
 ```sql
 WITH kw AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(search_vec, websearch_to_tsquery('english', $1)) DESC) AS rnk
     FROM entries
-    WHERE project = $2 AND deleted_at IS NULL
+    WHERE project IN ($2, '_global') AND deleted_at IS NULL
       AND search_vec @@ websearch_to_tsquery('english', $1)
     LIMIT 20
 ),
 fz AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY similarity(summary, $1) DESC) AS rnk
     FROM entries
-    WHERE project = $2 AND deleted_at IS NULL
+    WHERE project IN ($2, '_global') AND deleted_at IS NULL
       AND (summary % $1 OR key % $1)
     LIMIT 20
 ),
 sm AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $3::vector) AS rnk
     FROM entries
-    WHERE project = $2 AND deleted_at IS NULL
+    WHERE project IN ($2, '_global') AND deleted_at IS NULL
       AND embedding IS NOT NULL
       AND embedding_model = $4              -- current configured model tag
     ORDER BY embedding <=> $3::vector
@@ -412,10 +412,12 @@ fused AS (
     FROM (SELECT id FROM kw UNION SELECT id FROM fz UNION SELECT id FROM sm) ids
     LEFT JOIN kw USING(id) LEFT JOIN fz USING(id) LEFT JOIN sm USING(id)
 )
-SELECT e.key, e.category, e.summary, e.tags, e.file_paths, e.needs_refresh, f.score
+SELECT e.project, e.key, e.category, e.summary, e.tags, e.file_paths, e.needs_refresh, f.score
 FROM fused f JOIN entries e USING(id)
 ORDER BY f.score DESC LIMIT $5;
 ```
+
+Project and `_global` rows compete in the same rank lists, not in two separate result lists. `--file`, `--package` and `deps` filters are project-only: `_global` holds no `code:` rows, so it contributes nothing to them. `--tag` applies to both scopes, matched independently in each (§18.5). With `--no-global` outside any project there is no scope left: recall returns empty and exits 0.
 
 ### 6.4 Graceful degradation
 
@@ -438,6 +440,7 @@ anamnesis recall --file src/auth/session.ts
 anamnesis recall --tag auth,jwt                    # AND of tags
 anamnesis recall --package user-service
 anamnesis recall --category arch
+anamnesis recall "query" --no-global              # exclude the `_global` space (included by default, hits marked [global])
 
 # Write — single
 anamnesis remember \
@@ -447,6 +450,9 @@ anamnesis remember \
   --files "src/auth/verify.ts" \
   --summary "Stateless JWT verification. Exports verifyToken(). ..."
 # Scrubber runs first, then embedding, then insert.
+# Writes go to the current project. `--global` (on remember, remember-task, remember-batch)
+# targets `_global` instead: refused with `--category code`; a no-op outside any project;
+# for remember-batch it applies to the whole batch, there is no per-row scope.
 
 # Write — task sugar (auto-prepends task:<today>-)
 anamnesis remember-task \
@@ -475,10 +481,10 @@ anamnesis remember ... --pin                            # exempt from age-based 
 # Utility
 anamnesis scrub                                         # stdin → report secrets found, exit non-zero on hit
 anamnesis today                                         # prints YYYY-MM-DD (for agent task-key generation)
-anamnesis status                                        # project for cwd, 0 if active
+anamnesis status                                        # scope for cwd (project, else `_global`), exit 0
 ```
 
-All commands support `--format text` (default) and `--format json`. Project scope is resolved from cwd (walk up looking for `.anamnesis/project.yaml`); override with `--project`.
+All commands support `--format text` (default) and `--format json`. Project scope is resolved from cwd: the nearest `.anamnesis/project.yaml`, else `_global`; override with `--project`.
 
 ### 7.2 Operator-facing
 
@@ -542,7 +548,7 @@ anamnesis config get|set|list
 │  is inline in getSession() — no separate refresh endpoint.
 │  tags: auth, middleware, architecture
 │
-└─ task:2026-04-01-fix-refresh-race                            [0.72]
+└─ task:2026-04-01-fix-refresh-race                    [0.72] [global]
 │  Fixed a race where two concurrent requests both triggered refresh.
 │  Lock via an in-memory Map keyed by user id.
 │  tags: auth, concurrency, bugfix
@@ -656,8 +662,8 @@ Other hooks (auto-recall on `UserPromptSubmit`, nag on `Stop`) are available but
 
 Ships as a Claude Code skill. `anamnesis install-skill` writes `~/.claude/skills/anamnesis/SKILL.md` (global) or `.claude/skills/anamnesis/SKILL.md` (per-project). Skill content:
 
-- **Trigger:** when starting any coding task in a directory where `anamnesis status` succeeds.
-- **Discovery:** the skill shells `anamnesis status`; zero exit means anamnesis is active, non-zero means skip the rest.
+- **Trigger:** when starting any coding task in a directory where `anamnesis status` succeeds. Outside any registered project it still succeeds, reporting `_global`.
+- **Discovery:** the skill shells `anamnesis status`; zero exit means anamnesis is active (a project, or `_global` outside one), non-zero means skip the rest.
 - **Recall-before-read protocol:**
   1. `anamnesis recall "<task keywords>"` before reading files.
   2. For files in scope: `anamnesis recall --file <path>`.
@@ -665,6 +671,8 @@ Ships as a Claude Code skill. `anamnesis install-skill` writes `~/.claude/skills
   4. Read only what memory didn't cover.
 - **Stale entry rule:** `[stale]` results for files you're modifying — read the file, refresh after.
 - **Contribution protocol:** before declaring a task complete, call `remember-task` with non-obvious learnings.
+- **Global scope:** use `--global` only for knowledge that is not specific to the current project (personal conventions, best practices, transferable lessons). Default to the project when unsure; `forget` + `remember --global` moves an entry later.
+- **Session-summary drafts:** when drafting entries, propose project vs `_global` per entry and let the user confirm before writing.
 - **Scrub discipline:** summaries describe structure, not literal values. Pipe through `anamnesis scrub` to self-check before writing.
 - **Command cheat-sheet.**
 

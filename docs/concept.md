@@ -6,7 +6,7 @@ Anamnesis is a persistent memory system that any coding agent — Claude Code, C
 
 v1 targets a **single developer** on one machine, serving all their projects from one local Postgres instance. Multi-developer / team-shared mode is on the roadmap but not in v1.
 
-Storage is **PostgreSQL** with three extensions: **pgvector** (semantic embeddings), **pg_trgm** (fuzzy search), and **Apache AGE** (openCypher graph database). The anamnesis binary ships with a bundled local embedding model (**EmbeddingGemma-300M**, INT8 ONNX), so semantic recall works zero-config with no API keys. Users can opt into API providers (Voyage, OpenAI, Cohere, Ollama) for higher-quality vectors.
+Storage is **PostgreSQL** with three extensions: **pgvector** (semantic embeddings), **pg_trgm** (fuzzy search), and **Apache AGE** (openCypher graph database). The anamnesis binary ships with a bundled local embedding model (**EmbeddingGemma 2**, text tower, q8 ONNX), so semantic recall works zero-config with no API keys. Users can opt into API providers (Voyage, OpenAI, Cohere, Ollama) for higher-quality vectors.
 
 ---
 
@@ -172,7 +172,7 @@ CREATE TABLE entries (
     source                  TEXT,                              -- "scan" | "agent:claude-code" | "hook:post-commit" | ...
     content_hash            TEXT,                              -- git blob hash at write time; NULL for non-file entries
     embedding               vector(512),                       -- cluster-wide dimension (default; Matryoshka-truncated from 768)
-    embedding_model         TEXT,                              -- which model produced this vector (e.g. "embeddinggemma-300m@512")
+    embedding_model         TEXT,                              -- which model produced this vector (e.g. "embeddinggemma-2@512")
     embedding_generated_at  TIMESTAMPTZ,
     needs_refresh           BOOLEAN NOT NULL DEFAULT FALSE,    -- set by hooks on content-hash mismatch
     pinned                  BOOLEAN NOT NULL DEFAULT FALSE,    -- exempt from age-based pruning
@@ -219,7 +219,7 @@ CREATE INDEX idx_events_key        ON events(key) WHERE key IS NOT NULL;
 CREATE INDEX idx_events_op_ts      ON events(op, ts DESC);
 ```
 
-**Embedding dimension is cluster-wide** (all projects share it). Default **512**, produced by the bundled **EmbeddingGemma-300M** model with Matryoshka truncation from its native 768. Selectable at install time: `--embedding-dim 768` (max quality, +50% vector storage), `512` (default), `256` (thin install, ~3% quality loss), `128` (experimental). Switching providers or dimensions later requires an explicit `anamnesis re-embed` — see §13.
+**Embedding dimension is cluster-wide** (all projects share it). Default **512**, produced by the bundled **EmbeddingGemma 2** model with Matryoshka truncation from its native 768. Selectable at install time: `--embedding-dim 768` (max quality, +50% vector storage), `512` (default), `256` (thin install, ~3% quality loss), `128` (experimental). Switching providers or dimensions later requires an explicit `anamnesis re-embed` — see §13.
 
 **Scale targets:** sized for up to ~100k entries and ~1M graph edges without tuning. Beyond that, HNSW parameters may need adjustment.
 
@@ -349,16 +349,16 @@ A single `anamnesis recall` runs up to three search paths and fuses them with Re
 | **pg_trgm** | Typo-tolerant, substring match. | No semantic understanding. |
 | **pgvector** | Semantic across phrasings, languages, synonyms. | Needs an embedding model — **bundled locally by default** (no API key required). |
 
-The embedder is **owned by anamnesis and on by default**. First-run installs include a bundled local model (**EmbeddingGemma-300M**, INT8 ONNX, ~300 MB) — semantic recall works out of the box without any API keys or external services. Users who want higher-quality vectors can opt into API providers (Voyage, OpenAI, Cohere, Ollama) via config and `anamnesis re-embed`. See §13.
+The embedder is **owned by anamnesis and on by default**. First-run installs include a bundled local model (**EmbeddingGemma 2**, text tower, q8 ONNX, ~314 MB) — semantic recall works out of the box without any API keys or external services. Users who want higher-quality vectors can opt into API providers (Voyage, OpenAI, Cohere, Ollama) via config and `anamnesis re-embed`. See §13.
 
 ### 6.1 Code-aware prompt templating
 
-EmbeddingGemma supports task-specific query prefixes that meaningfully improve retrieval quality. Anamnesis applies these automatically based on the entry/query type — the caller never sees or sets a prefix:
+EmbeddingGemma 2 supports task-specific prompt formats that meaningfully improve retrieval quality. Anamnesis applies these automatically based on the entry/query type — the caller never sees or sets a prefix:
 
 | Context | Applied prefix |
 |---------|----------------|
-| Embedding a `code:` entry | `task: code retrieval \| document: ` |
-| Embedding an `arch:` / `conv:` / `task:` entry | `task: search result \| document: ` |
+| Embedding a `code:` entry | `title: <file path> \| text: ` |
+| Embedding an `arch:` / `conv:` / `task:` entry | `title: <entry key> \| text: ` |
 | `recall` query with no filter | `task: search result \| query: ` |
 | `recall --file <path>` or `--package <X>` (code-scoped) | `task: code retrieval \| query: ` |
 
@@ -370,7 +370,7 @@ The recall query string is stored in the `events` table (§15). Before storage, 
 
 ### 6.3 RRF query (simplified)
 
-Parameters: `$1` = query text, `$2` = project, `$3` = query vector, `$4` = current embedding-model tag (e.g. `embeddinggemma-300m@512`), `$5` = result limit.
+Parameters: `$1` = query text, `$2` = project, `$3` = query vector, `$4` = current embedding-model tag (e.g. `embeddinggemma-2@512`), `$5` = result limit.
 
 ```sql
 WITH kw AS (
@@ -778,18 +778,18 @@ No sanctioned downgrade path. Down-migrations exist for development/review hygie
 
 ### 13.1 Default: bundled local model
 
-Anamnesis ships with **EmbeddingGemma-300M** (Google DeepMind, Sept 2025) embedded in the binary. It is the best-in-class small embedding model as of April 2026 — **#1 on MTEB code retrieval under 500M parameters (68.76)**, with built-in task-prompt support for code-vs-general queries and Matryoshka Representation Learning that produces usable embeddings at 768, 512, 256, or 128 dimensions from one set of weights.
+Anamnesis ships with **EmbeddingGemma 2** (Google DeepMind, Oct 2026) embedded in the binary. It is the best-in-class small embedding model as of November 2026 — **MTEB code retrieval 78.68**, with built-in task-prompt support for code-vs-general queries and Matryoshka Representation Learning that produces usable embeddings at 768, 512, 256, or 128 dimensions from one set of weights.
 
 | Property | Value |
 |----------|-------|
-| Model | `onnx-community/embeddinggemma-300m-ONNX`, INT8 quantization |
+| Model | `onnx-community/embeddinggemma-2-ONNX`, text tower, q8 quantization |
 | Parameters | 308M |
 | Native dimension | 768 (Matryoshka-truncatable to 512 / 256 / 128) |
 | Default dimension in anamnesis | **512** |
-| Context | 2048 tokens (plenty for 100–500 token summaries) |
+| Context | 8K tokens (plenty for 100–500 token summaries) |
 | Languages | 100+ |
-| License | Gemma Terms of Use (commercial-friendly; use-based restrictions; must propagate terms on redistribution) |
-| Disk size (bundled, INT8) | ~300 MB |
+| License | Apache 2.0 |
+| Disk size (bundled, q8) | ~314 MB |
 | Inference latency (CPU) | 15–30 ms per embed on Apple Silicon, 20–50 ms on x86 |
 | Runtime | ONNX via `yalue/onnxruntime_go` (CGo; already present for tree-sitter) |
 | Runtime memory | ~200 MB resident while loaded; only loaded for operations that embed |
@@ -800,14 +800,14 @@ Anamnesis ships with **EmbeddingGemma-300M** (Google DeepMind, Sept 2025) embedd
 - Code-aware prompt templating (§6.1) is applied automatically — callers never think about it.
 - Quality is ~80% of the best API models on retrieval benchmarks. For domain-narrow code memory the gap is smaller.
 
-**Model weights** are embedded via `go:embed` for INT8. The INT4 quantization is available as an optional thin-install variant (`anamnesis install --embedding-quant int4`, ~150 MB, slight quality trade).
+**Model weights** are embedded via `go:embed` as q8. The INT4 quantization is available as an optional thin-install variant (`anamnesis install --embedding-quant int4`, ~150 MB, slight quality trade).
 
 ### 13.2 Opt-in API providers
 
 Users who want higher-quality vectors or specialized models can switch:
 
 ```bash
-anamnesis re-embed --provider voyage --model voyage-3-large [--dim 2048] [--dry-run]
+anamnesis re-embed --provider voyage --model voyage-4-large [--dim 2048] [--dry-run]
 anamnesis re-embed --provider openai --model text-embedding-3-large [--dim 3072]
 anamnesis re-embed --provider cohere --model embed-v4
 anamnesis re-embed --provider ollama --model nomic-embed-text [--base-url http://localhost:11434]
@@ -843,7 +843,7 @@ Recall's vector branch filters on both `embedding IS NOT NULL` **and** `embeddin
 - **Dim change.** Step 6 of §13.4 nulls every vector before the batch loop repopulates; rows drop from `sm` until re-embedded. Until the HNSW index is recreated in step 9, the `sm` CTE falls back to a sequential scan — fine for a few thousand rows, slow on a 100k-entry store. `anamnesis stats` surfaces *"index rebuilding"* so the user knows why recall feels heavier.
 - **Same-dim, different-model switch.** Old vectors remain in place, but their `embedding_model` tag still points at the previous provider/model, so the tag filter excludes them from `sm` until the batch loop overwrites with the new provider's vector. This prevents the silent-corruption case where two different vector spaces coexist in one HNSW index.
 
-`anamnesis stats` reports progress: *"re-embed in progress: 23,416 / 47,312 entries (49%) — model `voyage-3-large@512`"*.
+`anamnesis stats` reports progress: *"re-embed in progress: 23,416 / 47,312 entries (49%) — model `voyage-4-large@512`"*.
 
 ### 13.6 New writes during migration
 
@@ -851,7 +851,7 @@ Every `remember` call embeds with the **currently-configured** provider/model �
 
 ### 13.7 Model tag format
 
-`embedding_model` column stores a stable tag combining model name and dimension, e.g. `embeddinggemma-300m@512`, `voyage-3-large@2048`, `text-embedding-3-large@3072`. This lets anamnesis distinguish "same provider, different dim" as a migration-worthy state change.
+`embedding_model` column stores a stable tag combining model name and dimension, e.g. `embeddinggemma-2@512`, `voyage-4-large@2048`, `text-embedding-3-large@3072`. This lets anamnesis distinguish "same provider, different dim" as a migration-worthy state change.
 
 ### 13.8 Cluster-wide dimension limitation
 
@@ -1091,18 +1091,18 @@ database:
 
 embedding:
   provider: "local"              # local (default, bundled) | voyage | openai | cohere | ollama | openai-compatible
-  model: "embeddinggemma-300m"   # for provider=local; ignored on the other providers
+  model: "embeddinggemma-2"   # for provider=local; ignored on the other providers
   dimension: 512                 # cluster-wide. Matryoshka-truncated from 768 for local.
                                  #   Change requires re-embed.
-  quantization: "int8"           # local only: int8 (default, ~300 MB) | int4 (~150 MB, slight quality drop)
+  quantization: "int8"           # local only: int8 (default, q8 build, ~314 MB) | int4 (~150 MB, slight quality drop)
   # api_key_env: "VOYAGE_API_KEY"  # only needed when provider is an API provider
   batch_size: 32
   workers: 4
   timeout: 10s
   prompt_templates:              # applied transparently by anamnesis; override if you opted into a provider that handles prefixes differently
-    code_document: "task: code retrieval | document: "
+    code_document: "title: <file path> | text: "
     code_query:    "task: code retrieval | query: "
-    text_document: "task: search result | document: "
+    text_document: "title: <entry key> | text: "
     text_query:    "task: search result | query: "
 
 search:
@@ -1202,7 +1202,7 @@ graph:
 - CLI: `recall`, `remember`, `remember-batch`, `remember-task`, `forget`, `mark-stale`, `deps`, `scrub`, `today`, `status`.
 - Operator CLI: `server`, `init`, `scan`, `doctor`, `stats`, `audit`, `tags` (list/rename/merge), `migrate`, `re-embed`, `export`, `import`, `backup`, `restore`, `prune`, `install-skill`, `install-hooks`, `config`.
 - Tree-sitter analyzers: TypeScript/JavaScript, Go, Java, Dart (Flutter).
-- **Bundled local embedder: EmbeddingGemma-300M (INT8 ONNX), 512-dim via Matryoshka truncation, code-aware prompt templating, zero API keys required.**
+- **Bundled local embedder: EmbeddingGemma 2 (text tower, q8 ONNX), 512-dim via Matryoshka truncation, code-aware prompt templating, zero API keys required.**
 - **Opt-in API providers: `voyage`, `openai`, `cohere`, `ollama`, `openai-compatible` — user-configured via `config set embedding.provider ...` + `anamnesis re-embed`.**
 - Hybrid recall (tsvector + pg_trgm + pgvector with RRF fusion) — semantic recall works out of the box.
 - AGE graph: `Module` nodes, 10 edge types including Flutter `RENDERS`.
@@ -1216,7 +1216,7 @@ graph:
 - Schema migrations (implicit-safe, explicit-destructive).
 - Backup (plain SQL tarball) + graph-rebuild restore.
 - Claude Code SKILL.md + Codex/Aider protocol snippets.
-- `THIRD_PARTY_LICENSES.txt` in release artifacts covering Gemma Terms of Use (for EmbeddingGemma), tree-sitter grammars, ONNX runtime, and Go dependencies.
+- `THIRD_PARTY_LICENSES.txt` in release artifacts covering Apache 2.0 (for EmbeddingGemma 2), tree-sitter grammars, ONNX runtime, and Go dependencies.
 
 ### v1.1 (next)
 
@@ -1241,7 +1241,7 @@ graph:
 - Tree-sitter-dart grammar stability monitoring (community-maintained).
 - Tag-prefix recall query syntax.
 - Privacy of task entries in eventual team mode.
-- EmbeddingGemma successor model (if Google releases one) — switch is a one-line config change + `re-embed`.
+- Image embedding: index images in the repo (diagrams, screenshots) via EmbeddingGemma 2's vision encoder, which shares the text vector space, so text queries can find undescribed diagrams. Today, describing a diagram in an `arch:` entry with the image in `file_paths` already covers the main case.
 - GPU acceleration for the bundled embedder on supported hardware (Metal / CUDA via ONNX runtime providers). v1 is CPU-only; latency is already good.
 
 ---

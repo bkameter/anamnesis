@@ -493,8 +493,8 @@ All commands support `--format text` (default) and `--format json`. Project scop
 anamnesis server start|stop|status|logs            # `start` accepts --with-viewer (see §4.2)
 
 # Project setup
-anamnesis init [--at PATH] [--name NAME]           # register project, run Phase 1
-anamnesis project list|remove <name>
+anamnesis init [--at PATH] [--name NAME]           # register project, run Phase 1; refuses the reserved name `_global`
+anamnesis project list|remove <name>               # `_global` is listed as reserved; `remove _global` is refused (seeded, permanent)
 
 # Scan
 anamnesis scan                                     # re-run Phase 1 (graph only, deterministic)
@@ -516,10 +516,12 @@ anamnesis migrate [--dry-run] [--apply-destructive] [--to N] [--i-have-a-backup]
 anamnesis re-embed --provider X --model Y [--dim N] [--dry-run]
 
 # Data
+# Export/backup/prune cover the current project only; `_global` is included only when named
+# via --project _global (or by --all-projects where offered). `_global` rows are tagged with their project like any other.
 anamnesis export [--format json] [--include-graph] [--include-embeddings]
 anamnesis import < dump.json
-anamnesis backup [--project N] [--all-projects] [-o FILE] [--no-embeddings]
-anamnesis restore <file> [--project N] [--overwrite] [--skip-graph] [--verify]
+anamnesis backup [--project N] [--all-projects] [-o FILE] [--no-embeddings]   # default excludes `_global`; `--project _global` backs it up alone; `--all-projects` includes it
+anamnesis restore <file> [--project N] [--overwrite] [--skip-graph] [--verify]   # restoring `_global` skips the graph rebuild; no --skip-graph needed
 anamnesis prune                                    # Tier 1 only: tombstones + events past TTL
 anamnesis prune --orphans [--confirm]              # Tier 2: orphaned entries
 anamnesis prune --older-than 180d [--confirm]      # Tier 3: age-based, tasks/conv excluded
@@ -1006,6 +1008,10 @@ User-invoked only. No background daemon. `doctor` output nudges the user (*"14 o
 
 `anamnesis remember ... --pin` or `anamnesis pin <key>` sets `pinned=true`. Protects the most valuable hard-won entries from any future prune command. `anamnesis unpin <key>` reverses.
 
+### 16.7 `_global`
+
+Prune never targets `_global` unless invoked with `--project _global`. Tier 2 never matches it (no `code:` entries, so none are file-paired). Tiers 1 and 3 apply unchanged, including the `task:`/`conv:` exclusions.
+
 ---
 
 ## 17. Concurrency Model
@@ -1079,7 +1085,7 @@ None in v1. Flat namespace. Users wanting hierarchy use kebab prefixes (`auth`, 
 
 ### 18.5 Scope
 
-Tags are per-project. The same tag string in two different projects is independent.
+Tags are per-scope. The same tag string in two different projects is independent, and `_global` is its own namespace. `tags rename` / `tags merge` act on one scope at a time.
 
 ---
 
@@ -1228,6 +1234,7 @@ graph:
 - High-entropy secret scrubber with hard-block on write.
 - Events table + `audit` command.
 - Soft-delete + three-tier prune.
+- Reserved `_global` space for cross-project knowledge (`conv:`/`task:`/`arch:`): recalled by default alongside the project, written only via `--global` or outside any project.
 - Cluster-wide embedding dim + explicit resumable `re-embed` (used for switching between local and API providers).
 - Schema migrations (implicit-safe, explicit-destructive).
 - Backup (plain SQL tarball) + graph-rebuild restore.
@@ -1256,6 +1263,7 @@ graph:
 - HNSW parameter tuning guide for stores beyond 100k entries.
 - Tree-sitter-dart grammar stability monitoring (community-maintained).
 - Tag-prefix recall query syntax.
+- Ranking weights between project and `_global` results (v1 fuses them in one plain RRF).
 - Privacy of task entries in eventual team mode.
 - EmbeddingGemma successor model (if Google releases one) — switch is a one-line config change + `re-embed`.
 - GPU acceleration for the bundled embedder on supported hardware (Metal / CUDA via ONNX runtime providers). v1 is CPU-only; latency is already good.

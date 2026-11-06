@@ -65,7 +65,7 @@ Every entry belongs to one of four categories.
 
 ### 4.1 PostgreSQL + extensions
 
-A single Postgres 17 instance with three extensions:
+A single Postgres 18 instance with three extensions:
 
 | Extension | Purpose |
 |-----------|---------|
@@ -77,21 +77,21 @@ A single Postgres 17 instance with three extensions:
 
 ### 4.2 Docker image & compose
 
-No upstream image bundles all three, so anamnesis ships a Dockerfile that combines `pgvector/pgvector:pg17` as the base and builds Apache AGE on top. Custom port **55432** (not 5432, not 5433 — those collide with system Postgres installs on most dev machines).
+No upstream image bundles all three, so anamnesis ships a Dockerfile that combines `pgvector/pgvector:0.8.2-pg18` as the base and builds Apache AGE on top. Custom port **55432** (not 5432, not 5433 — those collide with system Postgres installs on most dev machines).
 
 ```dockerfile
 # docker/anamnesis-db/Dockerfile
-FROM pgvector/pgvector:pg17 AS base
+FROM pgvector/pgvector:0.8.2-pg18 AS base
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential git ca-certificates postgresql-server-dev-17 \
+        build-essential git ca-certificates postgresql-server-dev-18 \
         libreadline-dev zlib1g-dev flex bison && \
     cd /tmp && \
-    git clone --branch release/PG17/1.5.0 https://github.com/apache/age.git && \
+    git clone --branch PG18/v1.7.0-rc0 --depth 1 https://github.com/apache/age.git && \
     cd age && make && make install && \
     cd / && rm -rf /tmp/age && \
-    apt-get purge -y build-essential git postgresql-server-dev-17 \
+    apt-get purge -y build-essential git postgresql-server-dev-18 \
         libreadline-dev zlib1g-dev flex bison && \
     apt-get autoremove -y && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -104,14 +104,14 @@ RUN echo "shared_preload_libraries = 'age'" >> /usr/share/postgresql/postgresql.
 services:
   anamnesis-db:
     build: ./docker/anamnesis-db
-    image: anamnesis/postgres:17
+    image: anamnesis/postgres:18
     environment:
       POSTGRES_DB: anamnesis
       POSTGRES_USER: anamnesis
       POSTGRES_PASSWORD: anamnesis_local
     ports: ["55432:5432"]
     volumes:
-      - anamnesis_pgdata:/var/lib/postgresql/data
+      - anamnesis_pgdata:/var/lib/postgresql
       - ./docker/anamnesis-db/init.sql:/docker-entrypoint-initdb.d/00-extensions.sql
     command: >
       postgres
@@ -1198,7 +1198,7 @@ graph:
 
 ### v1 ships
 
-- Go binary (macOS arm64/amd64, Linux amd64/arm64), Docker Compose for Postgres 17 + pgvector + pg_trgm + AGE on port 55432, plus an opt-in Apache AGE Viewer service for graph visualisation.
+- Go binary (macOS arm64/amd64, Linux amd64/arm64), Docker Compose for Postgres 18 + pgvector + pg_trgm + AGE on port 55432, plus an opt-in Apache AGE Viewer service for graph visualisation.
 - CLI: `recall`, `remember`, `remember-batch`, `remember-task`, `forget`, `mark-stale`, `deps`, `scrub`, `today`, `status`.
 - Operator CLI: `server`, `init`, `scan`, `doctor`, `stats`, `audit`, `tags` (list/rename/merge), `migrate`, `re-embed`, `export`, `import`, `backup`, `restore`, `prune`, `install-skill`, `install-hooks`, `config`.
 - Tree-sitter analyzers: TypeScript/JavaScript, Go, Java, Dart (Flutter).

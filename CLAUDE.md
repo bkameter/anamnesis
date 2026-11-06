@@ -13,7 +13,7 @@ Monorepo. Two top-level components:
 | Folder | Purpose |
 |---|---|
 | [`app/`](app/) | Go module (`github.com/bkameter/anamnesis/app`). CLI entry point, internal packages, migrations. |
-| [`docker/`](docker/) | Local-dev stack: Postgres 17 + pgvector + pg_trgm + Apache AGE image, optional Apache AGE viewer. |
+| [`docker/`](docker/) | Local-dev stack: Postgres 18 + pgvector + pg_trgm + Apache AGE image, optional Apache AGE viewer. |
 | [`docs/`](docs/) | Design documents. `concept.md` is the current source of truth; treat it as normative. |
 
 ## Commands

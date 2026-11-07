@@ -31,8 +31,8 @@ services:
   # app-level auth, so any reachable host gets a Postgres login form. See
   # docs/concept.md §4.2.
   age-viewer:
-    build: https://github.com/apache/age-viewer.git#v1.0.0
-    image: anamnesis/age-viewer:1.0.0
+    build: ./age-viewer
+    image: anamnesis/age-viewer:1.0.0-node22
     profiles: ["viewer"]
     ports: ["127.0.0.1:8089:3001"]
     depends_on: [anamnesis-db]

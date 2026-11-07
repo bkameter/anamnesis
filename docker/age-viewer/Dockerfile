@@ -25,14 +25,17 @@
 #   error minimatch@10.2.5: The engine "node" is incompatible with this
 #   module. Expected version "18 || 20 || >=22". Got "14.18.2"
 #
-# This Dockerfile clones the upstream source at the v1.0.0 immutable tag and
-# builds it on node:22-alpine.  Two extra changes are required for Node 22
+# This Dockerfile clones the upstream source at the v1.0.0 tag and
+# builds it on node:22-alpine.  Three extra changes are required for Node 22
 # compatibility:
 #
 #   1. NODE_OPTIONS=--openssl-legacy-provider for the React (webpack 4)
 #      frontend build — react-scripts@4.x uses the legacy OpenSSL hash
 #      provider removed in Node 17+.
 #   2. `grep -E` instead of `egrep` — egrep was removed from Alpine >=3.19.
+#   3. DISABLE_ESLINT_PLUGIN=true for the frontend build — react-scripts@4.x
+#      fails on ESLint errors in the unlocked upstream source (no lockfile, so
+#      newer lint plugins resolve).  Upstream source is left untouched.
 #
 # The upstream entrypoint, port (3001), and runtime behaviour are unchanged.
 
@@ -50,7 +53,7 @@ WORKDIR /app/backend
 
 # Stage source and entrypoint from the upstream clone, then drop the clone.
 RUN cp -r /app-src/frontend /app/frontend && \
-    cp -r /app-src/backend  /app/backend  && \
+    cp -r /app-src/backend/. /app/backend && \
     cp /app-src/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh && \
     chmod +x /usr/local/bin/docker-entrypoint.sh && \
     ln -s /usr/local/bin/docker-entrypoint.sh / && \
@@ -59,11 +62,9 @@ RUN cp -r /app-src/frontend /app/frontend && \
 # Build frontend (React/webpack 4) and backend (Babel transpile), then strip
 # dev artifacts.  NODE_OPTIONS is required for the frontend build on Node >=17.
 RUN set -eux; \
-    apk --no-cache --virtual .build-deps add less openssh; \
-    \
     cd /app/frontend; \
     yarn install; \
-    NODE_OPTIONS=--openssl-legacy-provider yarn run build; \
+    DISABLE_ESLINT_PLUGIN=true NODE_OPTIONS=--openssl-legacy-provider yarn run build; \
     ls -A | grep -v 'build' | xargs rm -rf; \
     \
     cd /app/backend; \
@@ -72,8 +73,7 @@ RUN set -eux; \
     ls -A | grep -E -v "^(build|package|node_modules|sql)" | xargs rm -rf; \
     \
     cd /; \
-    rm -rf "$(yarn cache dir)"; \
-    apk del .build-deps
+    rm -rf "$(yarn cache dir)"
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 

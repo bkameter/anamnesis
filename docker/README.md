@@ -1,15 +1,15 @@
 # Docker — Anamnesis local stack
 
-Self-contained Postgres 17 + pgvector + pg_trgm + Apache AGE image, plus the optional Apache AGE viewer.
+Self-contained Postgres 18 + pgvector + pg_trgm + Apache AGE image, plus the optional Apache AGE viewer.
 
-See [`../docs/concept.md`](../docs/concept.md) §4.2 for the design rationale (why we build AGE on top of `pgvector/pgvector:pg17`, why port 55432, why the viewer is loopback-only).
+See [`../docs/concept.md`](../docs/concept.md) §4.2 for the design rationale (why we build AGE on top of `pgvector/pgvector:0.8.2-pg18`, why port 55432, why the viewer is loopback-only).
 
 ## Layout
 
 ```
 docker/
 ├── anamnesis-db/
-│   ├── Dockerfile       # pgvector base + Apache AGE 1.7.0-rc0 for PG17
+│   ├── Dockerfile       # pgvector base + Apache AGE 1.7.0 (tag PG18/v1.7.0-rc0)
 │   └── init.sql         # CREATE EXTENSION for pg_trgm, vector, age
 ├── compose.yaml         # anamnesis-db + (opt-in) age-viewer services
 └── README.md            # this file
@@ -28,6 +28,8 @@ docker compose -f docker/compose.yaml --profile viewer up -d
 
 # Tear everything down (stops every service regardless of profile).
 docker compose -f docker/compose.yaml down
+
+# Coming from the old PG 17 stack? Run `down -v` once; its data is not migrated.
 ```
 
 ## Connection details
@@ -68,7 +70,7 @@ The script waits for the container to report `healthy`, then runs four checks: e
 | Docker version | 28.3.2 |
 | Final image size | 154 MB |
 | First-build duration | ~47 s (Apple M-series, warm network) |
-| Apache AGE tag | `PG17/v1.7.0-rc0` (no stable PG17 release exists yet; `release/PG17/1.5.0` referenced in the concept doc never shipped upstream) |
+| Apache AGE tag | `PG18/v1.7.0-rc0` (upstream's tag for the final AGE 1.7.0 PG18 release) |
 
 ## AGE viewer first-paint
 

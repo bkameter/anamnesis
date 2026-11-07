@@ -37,7 +37,7 @@ The savings compound as memory grows. At large scale the story gets better, not 
 3. **Recall before read.** The canonical workflow is encoded in the skill: query memory → query the graph → read only the files not covered → complete the task → write back what was learned.
 4. **Memory is an optimisation, not a critical path.** Every dependency degrades gracefully. Postgres down, embedding provider unreachable, AGE extension missing — the agent falls back to normal file reads and gets the pre-anamnesis experience. Nothing breaks hard.
 5. **Human-inspectable.** Plain-text entries. Standard Postgres. `anamnesis audit` / `stats` / `doctor` show what's happening. `anamnesis export --format json` dumps everything. Nothing is opaque.
-6. **Multi-project by default.** One Postgres instance holds memory for every project on the machine. Project isolation via a `project` column + per-project AGE graph. Scoping is automatic from cwd.
+6. **Multi-project by default.** One Postgres instance holds memory for every project on the machine. Project isolation via a `project` column + per-project AGE graph. Scoping is automatic from cwd. The one exception is the reserved `_global` space (§3, §4.3): a recall may read it alongside the current project. Every other cross-project read is a bug.
 
 ---
 
@@ -58,6 +58,8 @@ Every entry belongs to one of four categories.
 - `code:` entries are paired to a file; they have a `content_hash` and participate in staleness detection.
 - `arch:` / `conv:` / `task:` entries are not paired to a single file's content; they don't go content-hash stale.
 - `task:` entries are never pruned by age by default — their value is timeless.
+
+**The `_global` space.** The reserved pseudo-project `_global` holds knowledge that is not specific to any one project: personal conventions, best practices, transferable lessons. It allows `conv:` (including best practices), `task:` and `arch:` entries — never `code:`, which is file-paired and needs a repo. `_global` has no repo root and no AGE graph, and `anamnesis init` refuses the name.
 
 ---
 
@@ -153,11 +155,14 @@ Power users who run their own Postgres point anamnesis at it via `ANAMNESIS_DATA
 
 CREATE TABLE projects (
     name        TEXT PRIMARY KEY,        -- "acme-monorepo", "personal-blog"
-    repo_root   TEXT NOT NULL,
-    graph_name  TEXT NOT NULL UNIQUE,    -- AGE graph name, sanitised from `name`
+    repo_root   TEXT,                    -- NULL only for `_global`
+    graph_name  TEXT UNIQUE,             -- AGE graph name, sanitised from `name`; NULL only for `_global`
     created_at  TIMESTAMPTZ DEFAULT NOW(),
-    last_scan   TIMESTAMPTZ
+    last_scan   TIMESTAMPTZ,
+    CHECK ((name = '_global') = (repo_root IS NULL AND graph_name IS NULL))
 );
+
+INSERT INTO projects (name) VALUES ('_global');   -- seeded by migration; permanent
 
 CREATE TABLE entries (
     id                      BIGSERIAL PRIMARY KEY,
@@ -184,7 +189,8 @@ CREATE TABLE entries (
     ) STORED,
     created_at              TIMESTAMPTZ DEFAULT NOW(),
     updated_at              TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(project, key)
+    UNIQUE(project, key),
+    CHECK (NOT (project = '_global' AND category = 'code'))   -- no file-paired entries without a repo
 );
 
 CREATE INDEX idx_entries_search         ON entries USING GIN(search_vec)          WHERE deleted_at IS NULL;
@@ -218,6 +224,8 @@ CREATE INDEX idx_events_project_ts ON events(project, ts DESC);
 CREATE INDEX idx_events_key        ON events(key) WHERE key IS NOT NULL;
 CREATE INDEX idx_events_op_ts      ON events(op, ts DESC);
 ```
+
+**`_global` in the schema.** `_global` is an ordinary `projects` row without `repo_root` or `graph_name`; the two `CHECK`s enforce that only it lacks them and that it never holds `code:` entries. They live in the database, not just the CLI, because every agent shares the database. A `code:` write aimed at `_global` is rejected with a clear error, never silently rerouted to the project. `deps` and other graph operations against `_global` error out like "AGE missing" (§6.4). `events` keeps its FK; `_global` operations log under `_global`.
 
 **Embedding dimension is cluster-wide** (all projects share it). Default **512**, produced by the bundled **EmbeddingGemma-300M** model with Matryoshka truncation from its native 768. Selectable at install time: `--embedding-dim 768` (max quality, +50% vector storage), `512` (default), `256` (thin install, ~3% quality loss), `128` (experimental). Switching providers or dimensions later requires an explicit `anamnesis re-embed` — see §13.
 
@@ -324,7 +332,7 @@ Agent: "Can I safely refactor PaymentService?"
 
 ## 6. Hybrid Recall
 
-A single `anamnesis recall` runs up to three search paths and fuses them with Reciprocal Rank Fusion (RRF).
+A single `anamnesis recall` runs up to three search paths and fuses them with Reciprocal Rank Fusion (RRF). By default the search covers the current project **and** the reserved `_global` space (§3) in one ranking; `--no-global` restricts it to the current project. `_global` hits are marked `[global]` in text output and `"scope":"global"` in JSON (§7.3).
 
 ```
       anamnesis recall "session cookie jwt"
@@ -370,27 +378,27 @@ The recall query string is stored in the `events` table (§15). Before storage, 
 
 ### 6.3 RRF query (simplified)
 
-Parameters: `$1` = query text, `$2` = project, `$3` = query vector, `$4` = current embedding-model tag (e.g. `embeddinggemma-300m@512`), `$5` = result limit.
+Parameters: `$1` = query text, `$2` = project (with `--no-global`, the `IN` list below shrinks to `($2)`; outside any project `$2` is `NULL`, so only `_global` matches), `$3` = query vector, `$4` = current embedding-model tag (e.g. `embeddinggemma-300m@512`), `$5` = result limit.
 
 ```sql
 WITH kw AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(search_vec, websearch_to_tsquery('english', $1)) DESC) AS rnk
     FROM entries
-    WHERE project = $2 AND deleted_at IS NULL
+    WHERE project IN ($2, '_global') AND deleted_at IS NULL
       AND search_vec @@ websearch_to_tsquery('english', $1)
     LIMIT 20
 ),
 fz AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY similarity(summary, $1) DESC) AS rnk
     FROM entries
-    WHERE project = $2 AND deleted_at IS NULL
+    WHERE project IN ($2, '_global') AND deleted_at IS NULL
       AND (summary % $1 OR key % $1)
     LIMIT 20
 ),
 sm AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $3::vector) AS rnk
     FROM entries
-    WHERE project = $2 AND deleted_at IS NULL
+    WHERE project IN ($2, '_global') AND deleted_at IS NULL
       AND embedding IS NOT NULL
       AND embedding_model = $4              -- current configured model tag
     ORDER BY embedding <=> $3::vector
@@ -404,10 +412,12 @@ fused AS (
     FROM (SELECT id FROM kw UNION SELECT id FROM fz UNION SELECT id FROM sm) ids
     LEFT JOIN kw USING(id) LEFT JOIN fz USING(id) LEFT JOIN sm USING(id)
 )
-SELECT e.key, e.category, e.summary, e.tags, e.file_paths, e.needs_refresh, f.score
+SELECT e.project, e.key, e.category, e.summary, e.tags, e.file_paths, e.needs_refresh, f.score
 FROM fused f JOIN entries e USING(id)
 ORDER BY f.score DESC LIMIT $5;
 ```
+
+Project and `_global` rows compete in the same rank lists, not in two separate result lists. `--file`, `--package` and `deps` filters are project-only: `_global` holds no `code:` rows, so it contributes nothing to them. `--tag` applies to both scopes, matched independently in each (§18.5). With `--no-global` outside any project there is no scope left: recall returns empty and exits 0.
 
 ### 6.4 Graceful degradation
 
@@ -430,6 +440,7 @@ anamnesis recall --file src/auth/session.ts
 anamnesis recall --tag auth,jwt                    # AND of tags
 anamnesis recall --package user-service
 anamnesis recall --category arch
+anamnesis recall "query" --no-global              # exclude the `_global` space (included by default, hits marked [global])
 
 # Write — single
 anamnesis remember \
@@ -439,6 +450,9 @@ anamnesis remember \
   --files "src/auth/verify.ts" \
   --summary "Stateless JWT verification. Exports verifyToken(). ..."
 # Scrubber runs first, then embedding, then insert.
+# Writes go to the current project. `--global` (on remember, remember-task, remember-batch)
+# targets `_global` instead: refused with `--category code`; a no-op outside any project;
+# for remember-batch it applies to the whole batch, there is no per-row scope.
 
 # Write — task sugar (auto-prepends task:<today>-)
 anamnesis remember-task \
@@ -467,10 +481,10 @@ anamnesis remember ... --pin                            # exempt from age-based 
 # Utility
 anamnesis scrub                                         # stdin → report secrets found, exit non-zero on hit
 anamnesis today                                         # prints YYYY-MM-DD (for agent task-key generation)
-anamnesis status                                        # project for cwd, 0 if active
+anamnesis status                                        # scope for cwd (project, else `_global`), exit 0
 ```
 
-All commands support `--format text` (default) and `--format json`. Project scope is resolved from cwd (walk up looking for `.anamnesis/project.yaml`); override with `--project`.
+All commands support `--format text` (default) and `--format json`. Project scope is resolved from cwd: the nearest `.anamnesis/project.yaml`, else `_global`; override with `--project`.
 
 ### 7.2 Operator-facing
 
@@ -479,8 +493,8 @@ All commands support `--format text` (default) and `--format json`. Project scop
 anamnesis server start|stop|status|logs            # `start` accepts --with-viewer (see §4.2)
 
 # Project setup
-anamnesis init [--at PATH] [--name NAME]           # register project, run Phase 1
-anamnesis project list|remove <name>
+anamnesis init [--at PATH] [--name NAME]           # register project, run Phase 1; refuses the reserved name `_global`
+anamnesis project list|remove <name>               # `_global` is listed as reserved; `remove _global` is refused (seeded, permanent)
 
 # Scan
 anamnesis scan                                     # re-run Phase 1 (graph only, deterministic)
@@ -502,10 +516,12 @@ anamnesis migrate [--dry-run] [--apply-destructive] [--to N] [--i-have-a-backup]
 anamnesis re-embed --provider X --model Y [--dim N] [--dry-run]
 
 # Data
+# Export/backup/prune cover the current project only; `_global` is included only when named
+# via --project _global (or by --all-projects where offered). `_global` rows are tagged with their project like any other.
 anamnesis export [--format json] [--include-graph] [--include-embeddings]
 anamnesis import < dump.json
-anamnesis backup [--project N] [--all-projects] [-o FILE] [--no-embeddings]
-anamnesis restore <file> [--project N] [--overwrite] [--skip-graph] [--verify]
+anamnesis backup [--project N] [--all-projects] [-o FILE] [--no-embeddings]   # default excludes `_global`; `--project _global` backs it up alone; `--all-projects` includes it
+anamnesis restore <file> [--project N] [--overwrite] [--skip-graph] [--verify]   # restoring `_global` skips the graph rebuild; no --skip-graph needed
 anamnesis prune                                    # Tier 1 only: tombstones + events past TTL
 anamnesis prune --orphans [--confirm]              # Tier 2: orphaned entries
 anamnesis prune --older-than 180d [--confirm]      # Tier 3: age-based, tasks/conv excluded
@@ -534,7 +550,7 @@ anamnesis config get|set|list
 │  is inline in getSession() — no separate refresh endpoint.
 │  tags: auth, middleware, architecture
 │
-└─ task:2026-04-01-fix-refresh-race                            [0.72]
+└─ task:2026-04-01-fix-refresh-race                    [0.72] [global]
 │  Fixed a race where two concurrent requests both triggered refresh.
 │  Lock via an in-memory Map keyed by user id.
 │  tags: auth, concurrency, bugfix
@@ -648,8 +664,8 @@ Other hooks (auto-recall on `UserPromptSubmit`, nag on `Stop`) are available but
 
 Ships as a Claude Code skill. `anamnesis install-skill` writes `~/.claude/skills/anamnesis/SKILL.md` (global) or `.claude/skills/anamnesis/SKILL.md` (per-project). Skill content:
 
-- **Trigger:** when starting any coding task in a directory where `anamnesis status` succeeds.
-- **Discovery:** the skill shells `anamnesis status`; zero exit means anamnesis is active, non-zero means skip the rest.
+- **Trigger:** when starting any coding task in a directory where `anamnesis status` succeeds. Outside any registered project it still succeeds, reporting `_global`.
+- **Discovery:** the skill shells `anamnesis status`; zero exit means anamnesis is active (a project, or `_global` outside one), non-zero means skip the rest.
 - **Recall-before-read protocol:**
   1. `anamnesis recall "<task keywords>"` before reading files.
   2. For files in scope: `anamnesis recall --file <path>`.
@@ -657,6 +673,8 @@ Ships as a Claude Code skill. `anamnesis install-skill` writes `~/.claude/skills
   4. Read only what memory didn't cover.
 - **Stale entry rule:** `[stale]` results for files you're modifying — read the file, refresh after.
 - **Contribution protocol:** before declaring a task complete, call `remember-task` with non-obvious learnings.
+- **Global scope:** use `--global` only for knowledge that is not specific to the current project (personal conventions, best practices, transferable lessons). Default to the project when unsure; `forget` + `remember --global` moves an entry later.
+- **Session-summary drafts:** when drafting entries, propose project vs `_global` per entry and let the user confirm before writing.
 - **Scrub discipline:** summaries describe structure, not literal values. Pipe through `anamnesis scrub` to self-check before writing.
 - **Command cheat-sheet.**
 
@@ -990,6 +1008,10 @@ User-invoked only. No background daemon. `doctor` output nudges the user (*"14 o
 
 `anamnesis remember ... --pin` or `anamnesis pin <key>` sets `pinned=true`. Protects the most valuable hard-won entries from any future prune command. `anamnesis unpin <key>` reverses.
 
+### 16.7 `_global`
+
+Prune never targets `_global` unless invoked with `--project _global`. Tier 2 never matches it (no `code:` entries, so none are file-paired). Tiers 1 and 3 apply unchanged, including the `task:`/`conv:` exclusions.
+
 ---
 
 ## 17. Concurrency Model
@@ -1063,7 +1085,7 @@ None in v1. Flat namespace. Users wanting hierarchy use kebab prefixes (`auth`, 
 
 ### 18.5 Scope
 
-Tags are per-project. The same tag string in two different projects is independent.
+Tags are per-scope. The same tag string in two different projects is independent, and `_global` is its own namespace. `tags rename` / `tags merge` act on one scope at a time.
 
 ---
 
@@ -1212,6 +1234,7 @@ graph:
 - High-entropy secret scrubber with hard-block on write.
 - Events table + `audit` command.
 - Soft-delete + three-tier prune.
+- Reserved `_global` space for cross-project knowledge (`conv:`/`task:`/`arch:`): recalled by default alongside the project, written only via `--global` or outside any project.
 - Cluster-wide embedding dim + explicit resumable `re-embed` (used for switching between local and API providers).
 - Schema migrations (implicit-safe, explicit-destructive).
 - Backup (plain SQL tarball) + graph-rebuild restore.
@@ -1240,6 +1263,7 @@ graph:
 - HNSW parameter tuning guide for stores beyond 100k entries.
 - Tree-sitter-dart grammar stability monitoring (community-maintained).
 - Tag-prefix recall query syntax.
+- Ranking weights between project and `_global` results (v1 fuses them in one plain RRF).
 - Privacy of task entries in eventual team mode.
 - EmbeddingGemma successor model (if Google releases one) — switch is a one-line config change + `re-embed`.
 - GPU acceleration for the bundled embedder on supported hardware (Metal / CUDA via ONNX runtime providers). v1 is CPU-only; latency is already good.

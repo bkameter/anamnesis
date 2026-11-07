@@ -9,14 +9,14 @@
 services:
   anamnesis-db:
     build: ./anamnesis-db
-    image: anamnesis/postgres:17
+    image: anamnesis/postgres:18
     environment:
       POSTGRES_DB: anamnesis
       POSTGRES_USER: anamnesis
       POSTGRES_PASSWORD: anamnesis_local
     ports: ["55432:5432"]
     volumes:
-      - anamnesis_pgdata:/var/lib/postgresql/data
+      - anamnesis_pgdata:/var/lib/postgresql
       - ./anamnesis-db/init.sql:/docker-entrypoint-initdb.d/00-extensions.sql
     command: >
       postgres

@@ -1,11 +1,13 @@
 name: ci
 on:
     pull_request:
-        branches: [develop, main]
+        branches: [develop]
+    push:
+        branches: [develop]
 permissions:
     contents: read
 jobs:
-    build-test:
+    ci:
         runs-on: ubuntu-latest
         defaults:
             run:
@@ -16,6 +18,13 @@ jobs:
               with:
                   go-version-file: app/go.mod
             - run: go build ./...
-            # `go test` exits 1 on a module with no packages; skip it only then.
-            - run: |
-                  if [ -n "$(go list ./... 2>/dev/null)" ]; then go test ./...; fi
+            # Guarded like the Loom config: `go test`/lint fail on a module with no packages.
+            - id: pkgs
+              run: if go list ./... 2>/dev/null | grep -q .; then echo "any=true" >> "$GITHUB_OUTPUT"; else echo 'no Go packages yet'; fi
+            - if: steps.pkgs.outputs.any == 'true'
+              run: go test ./...
+            - if: steps.pkgs.outputs.any == 'true'
+              uses: golangci/golangci-lint-action@v6
+              with:
+                  version: latest
+                  working-directory: app

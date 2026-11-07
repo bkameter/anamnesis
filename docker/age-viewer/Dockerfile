@@ -39,15 +39,16 @@
 #
 # The upstream entrypoint, port (3001), and runtime behaviour are unchanged.
 
-FROM node:22-alpine
+FROM node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202
 
-# Fetch upstream source at the pinned v1.0.0 tag.
+# Fetch upstream source at v1.0.0; the commit SHA check guards against a moved tag.
 RUN apk --no-cache add git && \
     git clone --depth 1 --branch v1.0.0 \
         https://github.com/apache/age-viewer.git /app-src && \
+    test "$(git -C /app-src rev-parse HEAD)" = 2c55b2302875449565674aa039517734cf338031 && \
     apk del git
 
-RUN mkdir -p /app && apk --no-cache add bash
+RUN apk --no-cache add bash
 
 WORKDIR /app/backend
 

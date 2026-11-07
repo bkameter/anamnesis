@@ -49,7 +49,7 @@ Every entry belongs to one of four categories.
 |----------|-----------|------------------|------------|---------|
 | **Code** | `code:` | What a file/module does: exports, dependencies, patterns, contracts. | Initial scan, agent opportunistic fill-in, post-edit refresh | `code:src/auth/session.ts` — "Session handling. Exports getSession(), requireSession(). Reads JWT from cookie `sid`. Throws UnauthorizedError on miss." |
 | **Architecture** | `arch:` | How components connect: data flow, design decisions, invariants. | Agent after learning from docs / code reading | `arch:auth-flow` — "Middleware in src/middleware.ts rewrites to /login for unauthenticated requests to /app/*. Token refresh inline in getSession()." |
-| **Task** | `task:YYYY-MM-DD-<slug>` | Lessons from completed work: what was tricky, what surprised the agent, gotchas for future sessions. | Agent after finishing a task | `task:2026-04-16-extract-jwt-verify` — "Gotcha: tests stub Date.now via vi.useFakeTimers — don't import Date.now directly." |
+| **Task** | `task:YYYY-MM-DD-<slug>` | Lessons from completed work: what was tricky, what surprised the agent, gotchas for future sessions. | Agent after finishing a task; per-session summary only after user approval (§9.5) | `task:2026-04-16-extract-jwt-verify` — "Gotcha: tests stub Date.now via vi.useFakeTimers — don't import Date.now directly." Session summaries use `task:<start-date>-session-<session-id>` (§9.5). |
 | **Convention** | `conv:` | Coding standards, naming rules, tooling quirks. | Human; agent when reading docs/ADRs | `conv:error-handling` — "All route handlers throw `AppError`. Never throw raw Error — the middleware won't map it." |
 
 **Size constraint:** 100–500 tokens per summary. Long enough to be useful, short enough that a recall returning 10 entries stays under ~5k tokens of agent context.
@@ -599,7 +599,7 @@ Entry generation happens in two modes, both driven by the running agent via the 
 
 ## 9. Keeping Memory Current
 
-Three update mechanisms, ordered by frequency:
+Four update mechanisms, ordered by frequency:
 
 ### 9.1 Agent contribution (after every task)
 
@@ -613,7 +613,7 @@ anamnesis remember-task --slug <kebab-slug> \
 
 The skill documents the guideline: *focus on non-obvious information — things a future session couldn't recover by reading the code. Skip recap. Under 300 words.*
 
-Granularity: one entry per logical completed task (roughly PR scope), not per file, not per session.
+Granularity: one entry per logical completed task (roughly PR scope), not per file. A per-session summary (§9.5) is a separate `task:` entry with its own key; it coexists with, and never replaces, the per-task entries.
 
 ### 9.2 Post-commit hook — graph refresh + staleness marking
 
@@ -644,7 +644,7 @@ Cost: zero tokens. The agent's next recall sees `[stale]` markers for files the 
 
 Opt-in via `anamnesis install-hooks`. When Claude Code's `Edit` or `Write` tool modifies a file, the hook runs `anamnesis scan --file <path>` — updates graph edges for the edited file *within the session* so follow-up `deps` queries in the same conversation are current. Also marks the entry `needs_refresh`.
 
-Other hooks (auto-recall on `UserPromptSubmit`, nag on `Stop`) are available but not installed by default. Auto-inject is a footgun: injecting 10 recall results into every user prompt costs tokens the agent might not need and noise-inflates the conversation.
+Other hooks (auto-recall on `UserPromptSubmit`) are available but not installed by default. The `Stop` and `SessionEnd` hooks for session summaries are described in §9.5 and are also opt-in. Auto-inject is a footgun: injecting 10 recall results into every user prompt costs tokens the agent might not need and noise-inflates the conversation.
 
 ### 9.4 Staleness detection and refresh protocol
 
@@ -655,6 +655,36 @@ Other hooks (auto-recall on `UserPromptSubmit`, nag on `Stop`) are available but
 **Refresh is always agent-driven.** Hooks flag; they never rewrite summaries (storage-only rule). The skill instructs the agent: *if a recall result is [stale] for a file you're modifying, verify by reading the file, and after your task is complete, draft an updated summary and call `remember` to refresh.* Writing `remember` recomputes and stores the new `content_hash`, clearing the flag.
 
 **`arch:` / `conv:` / `task:` entries are not content-hash-stale** — they have no single file. They can be marked stale manually via `anamnesis mark-stale` or pruned individually.
+
+### 9.5 Session summaries (user-approved)
+
+Sessions without a finished task (discussion, research, aborted work) would otherwise leave nothing behind. A session summary captures them — **only after explicit user approval**. No path in this section writes to memory without it, and Anamnesis never drafts: the agent already running drafts the text (storage-only, §2.2).
+
+**Storage.** One `task:` entry per session, key `task:<start-date>-session-<session-id>`, where `<session-id>` is `ANAMNESIS_SESSION_ID` (§15.1) and the date is the session's *start* date, recorded in the session state below at session start and reused on every save, including a marker-based save in a later session (a session spanning midnight keeps its key). Each approval is an upsert of that key via `anamnesis remember --key … --category task` — no new CLI command. The entry keeps `task:` semantics (never age-pruned, §16.3) and the §3 size limit of 100–500 tokens. Fixed sections:
+
+- **Decisions** — what was decided and why.
+- **Open / next steps** — what a later session should pick up.
+- **Gotchas** — non-obvious findings.
+
+An empty section is omitted. If the session also finishes a task, the `remember-task` entry (§9.1) is written separately; neither replaces the other.
+
+**Session state.** The Stop hook, `SessionEnd` hook and skill share one small local file per session in the project's gitignored `.anamnesis/` directory. It holds the session id, start date, transcript path, active-time counter (for the throttle) and the *decision point* (timestamp of the last save/discard plus transcript position). Local state, not a memory write — it works with Postgres down.
+
+**Approval loop.** The agent shows the draft and asks: **save / discard / later**.
+
+A save replaces the whole entry, so the draft must always be the full session summary: if the key already exists, the agent recalls the entry and merges the new material into it before showing the draft. The decision point only limits what is *new* in the transcript, never what the entry keeps. This applies equally to marker-based saves.
+
+- *save* — upsert the entry; records the decision point in the session state.
+- *discard* — writes nothing to memory; records the decision point in the session state, so later drafts cover only newer material.
+- *later* — writes nothing, records nothing; the next prompt comes at the next throttle window.
+
+**Periodic prompt (Claude Code `Stop` hook, opt-in).** A throttled hook that does nothing but prompt the agent to draft and ask. It never calls `remember` itself. It fires at most once per `updates.session_summary_interval` (default 30 min, §19.2) of *active* session time — time spent in agent turns, not idle wall-clock — and not at all when nothing is new since the last decision.
+
+**Manual trigger.** The user can say "save the session" at any time; the skill (§10.1) then runs the same approval loop. This is the only path for agents without hooks (Codex, Aider; §10.2).
+
+**Session-end safety net (Claude Code `SessionEnd` hook, opt-in).** At session end the hook marks the session state as *pending* and adds an offer count (initially 0); this is the *pending marker*. A marker-based save uses the marker's session id and start date, so the key matches an in-session save. At session start the skill checks for markers in *that project only* (a marker is never offered in another project). For each marker, the agent drafts a summary from the transcript and asks save / discard / later. A marker is offered on up to 3 session starts (every offer counts, including "later"), then discarded; it is dropped without a prompt when nothing is new since the recorded decision point of that session, or when the transcript no longer exists. Several markers are offered one at a time, oldest first.
+
+Deliberately not covered: background or headless summarisation at session end, recovery after a hard crash (no `SessionEnd` fires), and transcripts Claude Code has already deleted (30 days by default).
 
 ---
 
@@ -676,13 +706,14 @@ Ships as a Claude Code skill. `anamnesis install-skill` writes `~/.claude/skills
 - **Global scope:** use `--global` only for knowledge that is not specific to the current project (personal conventions, best practices, transferable lessons). Default to the project when unsure; `forget` + `remember --global` moves an entry later.
 - **Session-summary drafts:** when drafting entries, propose project vs `_global` per entry and let the user confirm before writing.
 - **Scrub discipline:** summaries describe structure, not literal values. Pipe through `anamnesis scrub` to self-check before writing.
+- **Session summaries:** on "save the session", and at session start when a pending marker exists, draft a summary and run the save / discard / later loop (§9.5). Never write without approval.
 - **Command cheat-sheet.**
 
-`anamnesis install-hooks` optionally registers the `PostToolUse` graph-refresh hook. No other hooks by default.
+`anamnesis install-hooks` optionally registers the `PostToolUse` graph-refresh hook and the `Stop` / `SessionEnd` session-summary hooks (§9.5). None are installed by default.
 
 ### 10.2 Other agents (Codex / Aider / custom)
 
-`anamnesis install-skill --format codex|aider|plain` prints the same protocol formatted as a system-prompt snippet. One source of truth, multiple output formats. The CLI protocol is the canonical contract; every agent just needs to know it can shell out to `anamnesis`.
+`anamnesis install-skill --format codex|aider|plain` prints the same protocol formatted as a system-prompt snippet. One source of truth, multiple output formats. The CLI protocol is the canonical contract; every agent just needs to know it can shell out to `anamnesis`. Agents without hooks have no periodic prompt or pending marker; they use the manual "save the session" trigger (§9.5).
 
 ### 10.3 Shared memory across agents
 
@@ -1144,6 +1175,7 @@ updates:
   git_hooks_default: true
   claude_code_hooks_default: false     # opt-in via install-hooks
   max_diff_tokens: 2000
+  session_summary_interval: 30m        # min active-session time between Stop-hook summary prompts (§9.5)
 
 scrubber:
   extra_patterns: []                    # project can add more
@@ -1196,7 +1228,9 @@ graph:
 | Empty store (pre-scan) | Nothing to recall | Agent proceeds with normal file reads. `recall` returns empty. |
 | Post-commit hook fails | Slightly stale graph / flag | Non-fatal. Next commit or `anamnesis scan --changed` corrects. |
 | Scan fails mid-way | Partial index | Already-written entries and graph nodes are kept. `scan --resume` continues. |
-| Agent skips `remember` | Lost task insight | Best-effort. Skill prompt reminds; optional `Stop` hook nags more loudly. |
+| Agent skips `remember` | Lost task insight | Best-effort. Skill prompt reminds; the optional `Stop` hook (§9.5) also prompts for a session summary. |
+| Session-summary hook or pending marker fails (hook error, missing/corrupt marker file) | No periodic prompt or session-start offer | Non-fatal; the marker is dropped. The manual "save the session" trigger still works. |
+| Postgres down when a summary is approved | Summary not stored | Agent reports the failure; nothing is lost silently and the user can retry. |
 | Event write fails | Missing audit row for that op | Non-fatal; logged at debug level. Primary op reports success. |
 | Scrubber false-positive | Legit write blocked | `--force-insecure` bypasses with audit record. Pattern fix in next release. |
 | `ANAMNESIS_ENABLED=false` | Disabled entirely | `recall`/`deps` return empty, `remember` no-ops, agent works normally. |
@@ -1206,13 +1240,13 @@ graph:
 ## 21. Non-Goals
 
 - **Not a completion-LLM orchestration tool.** Anamnesis owns embeddings (bundled local by default, API providers opt-in) as a pragmatic exception; all summary drafting is the agent's.
-- **Not a chat-history store.** Conversations belong in the agent's history. Anamnesis stores *project knowledge*, not *session state*.
+- **Not a chat-history store.** Conversations belong in the agent's history; raw transcripts are never stored. Anamnesis stores *project knowledge* — including a short, user-approved session summary (§9.5): summaries yes, chat history no.
 - **Not a firehose into agent context.** Memory is queried through a structured CLI. The agent decides what to recall.
 - **Not a replacement for reading code.** Memory is a summary. When the agent needs exact current content, it still opens the file. Anamnesis tells it *which* file.
 - **Not a style / policy enforcer.** `conv:` entries describe conventions; anamnesis does not lint or reject code.
 - **Not team-shared in v1.** Multi-developer workflows, shared Postgres with ACLs, collaborative task entries — all v2.
 - **Not an MCP server in v1.** CLI is the canonical contract. MCP layer is v1.x.
-- **No scheduled background jobs in v1** (backups, prunes, re-embeds are user-invoked). Daemon-style automation is v2.
+- **No scheduled background jobs in v1** (backups, prunes, re-embeds are user-invoked). Daemon-style automation is v2. The session-summary hooks (§9.5) are agent-session events, not a daemon.
 
 ---
 

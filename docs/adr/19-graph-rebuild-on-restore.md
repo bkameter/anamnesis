@@ -16,5 +16,5 @@ A careless restore wrecks months of accumulated memory. §14 wants a restore pat
 
 ## Consequences
 - Backups are smaller and independent of the AGE version.
-- A restore needs the source tree to rebuild the graph, and `--skip-graph` exists for when it is not available.
+- The graph is rebuilt from source after restore; `restore` offers `--skip-graph` (§14.2).
 - Embeddings are included by default because they are expensive to regenerate.
